@@ -1,0 +1,471 @@
+Google Earth Engine code: https://code.earthengine.google.com/060b60103337f949b11a1c2672ca58e4
+repository file created on 19/08/2022
+
+var hansen: 
+  type: Image
+  id: UMD/hansen/global_forest_change_2019_v1_7
+  version: 1641990740790847
+
+var geom1: 
+  type: Polygon
+  coordinates: List (1 element)
+  0: List (5 elements)
+    0: [-12.257967630913997,6.691748178357104]
+    1: [-8.478670755913997,6.691748178357104]
+    2: [-8.478670755913997,9.9849432096073]
+    3: [-12.257967630913997,9.9849432096073]
+    4: [-12.257967630913997,6.691748178357104]
+  geodesic: false
+
+var geom2: 
+  type: Polygon
+  coordinates: List (1 element)
+  0: List (5 elements)
+
+  geodesic: false
+
+var geom2: 
+  type: Polygon
+  coordinates: List (1 element)
+  0: List (5 elements)
+    0: [-9.401522318413997,4.228499371338102]
+    1: [-6.709871927788997,4.228499371338102]
+    2: [-6.709871927788997,7.7924976243267645]
+    3: [-9.401522318413997,7.7924976243267645]
+    4: [-9.401522318413997,4.228499371338102]
+  geodesic: false
+
+var S2imageCollection: ImageCollection "Sentinel-2 MSI: MultiSpectral Instrument, Level-2A"
+  type: ImageCollection
+  id: COPERNICUS/S2_SR
+  version: 1663565659611344
+
+var homeRange_PH: 
+
+
+var loss:
+
+Map.centerObject(homeRange_PH,9);
+Map.setOptions('SATELLITE'); 
+
+// Set visualization parameters
+var plasmaPalette = ['0d0887', '3d049b', '6903a5','8d0fa1','ae2891','cb4679','df6363','f0844c','faa638', 'fbcc27','f0f921'];
+
+// Bands to select during collection creation.
+var bandNames = ['blue', 'green', 'red','redEdge1','redEdge2','redEdge3', 'nir','redEdge4', 'swir1','swir2'];
+var S2bands = ['B2','B3','B4','B5','B6','B7','B8','B8A','B11','B12'];
+
+/*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~ Define the parameters for the sentinel image retreival and cloud mask
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/
+// Set Dates.
+var startDate = '2019-01-01'; //changed from 2017 to 2016 to reduce the effects of clouds
+var endDate = '2019-12-31';
+var CLOUD_FILTER = 90; // Maximum image cloud cover percent allowed in image collection
+var CLD_PRB_THRESH = 50; // Cloud probability (%); values greater than are considered cloud
+var NIR_DRK_THRESH = 0.15; // Near-infrared reflectance; values less than are considered potential cloud shadow
+var CLD_PRJ_DIST = 1; //Maximum distance (km) to search for cloud shadows from cloud edges
+var BUFFER = 50; //Distance (m) to dilate the edge of cloud-identified objects
+
+/*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~ Define the function to create the  Sentinel 2 collection
+source: https://developers.google.com/earth-engine/tutorials/community/sentinel-2-s2cloudless
+Source: https://code.earthengine.google.com/f0fa2a9ae2f478b89f9f8ba8aab644a5
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/
+// Create a function to retreive the Sentinel 2 images.
+function get_s2_sr_cld_col(aoi, start_date, end_date){
+    // Import and filter S2 collection
+    var s2_sr_col = (S2imageCollection
+        .filterBounds(homeRange_PH)
+        .filterDate(startDate, endDate)
+        .filter(ee.Filter.lte('CLOUDY_PIXEL_PERCENTAGE', CLOUD_FILTER)));
+
+    // Import and filter s2cloudless.
+    var s2_cloudless_col = (ee.ImageCollection('COPERNICUS/S2_CLOUD_PROBABILITY')
+        .filterBounds(homeRange_PH)
+        .filterDate(startDate, endDate));
+
+    // Join the filtered s2cloudless collection to the SR collection by the 'system:index' property.
+    return ee.ImageCollection(ee.Join.saveFirst('s2cloudless').apply({
+        'primary': s2_sr_col,
+        'secondary': s2_cloudless_col,
+        'condition': ee.Filter.equals({
+            'leftField': 'system:index',
+            'rightField': 'system:index'
+        })
+    }));
+}
+
+/*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~ Define cloud and cloud shadow mask functions for S2 collection
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/
+// CLOUD COMPONENTS
+// Define a function to add the s2cloudless probability layer and derived cloud mask as bands to an S2 SR image input.
+function add_cloud_bands(img){
+    // Get s2cloudless image, subset the probability band.
+    var cld_prb = ee.Image(img.get('s2cloudless')).select('probability');
+    // Condition s2cloudless by the probability threshold value.
+    var is_cloud = cld_prb.gt(CLD_PRB_THRESH).rename('clouds');
+    // Add the cloud probability layer and cloud mask as image bands.
+    return img.addBands(ee.Image([cld_prb, is_cloud]));
+}
+
+// SHADOW COMPONENTS
+function add_shadow_bands(img){
+    // Identify water pixels from the SCL band.
+    var not_water = img.select('SCL').neq(6);
+    // var not_water = img.normalizedDifference(['B3', 'B8']).lt(0.2) // Use this if you are using the TOA version
+    // Identify dark NIR pixels that are not water (potential cloud shadow pixels).
+    var SR_BAND_SCALE = 1e4;
+    var dark_pixels = img.select('B8').lt(NIR_DRK_THRESH*SR_BAND_SCALE).multiply(not_water).rename('dark_pixels');
+    // Determine the direction to project cloud shadow from clouds (assumes UTM projection).
+    var shadow_azimuth = ee.Number(90).subtract(ee.Number(img.get('MEAN_SOLAR_AZIMUTH_ANGLE')));
+    // Project shadows from clouds for the distance specified by the CLD_PRJ_DIST input.
+    var cld_proj = (img.select('clouds').directionalDistanceTransform(shadow_azimuth, CLD_PRJ_DIST*10)
+        .reproject({'crs': img.select(0).projection(), 'scale': 100})
+        .select('distance')
+        .mask()
+        .rename('cloud_transform'));
+    // Identify the intersection of dark pixels with cloud shadow projection.
+    var shadows = cld_proj.multiply(dark_pixels).rename('shadows');
+    // Add dark pixels, cloud projection, and identified shadows as image bands.
+    return img.addBands(ee.Image([dark_pixels, cld_proj, shadows]));
+}
+
+// Final cloud-shadow mask
+// Define a function to assemble all of the cloud and cloud shadow components and produce the final mask.
+function add_cld_shdw_mask(img){
+    // Add cloud component bands.
+    var img_cloud = add_cloud_bands(img);
+    // Add cloud shadow component bands.
+    var img_cloud_shadow = add_shadow_bands(img_cloud);
+    // Combine cloud and shadow mask, set cloud and shadow as value 1, else 0.
+    var is_cld_shdw = img_cloud_shadow.select('clouds').add(img_cloud_shadow.select('shadows')).gt(0);
+    // Remove small cloud-shadow patches and dilate remaining pixels by BUFFER input.
+    // 20 m scale is for speed, and assumes clouds don't require 10 m precision.
+    var is_cld_shdw2 = (is_cld_shdw.focal_min(2).focal_max(BUFFER*2/20)
+        .reproject({'crs': img.select([0]).projection(), 'scale': 20})
+        .rename('cloudmask'));
+    // Add the final cloud-shadow mask to the image.
+    return img_cloud_shadow.addBands(is_cld_shdw2);
+}
+
+// create a function that applies the cloud-shadow mask to each image in the collection
+function apply_cld_shdw_mask(img){
+    // Subset the cloudmask band and invert it so clouds/shadow are 0, else 1.
+    var not_cld_shdw = img.select('cloudmask').not();
+    // Subset reflectance bands and update their masks, return the result.
+    return img.select(S2bands, bandNames).updateMask(not_cld_shdw); //change the band names
+    // return img.select('B*').updateMask(not_cld_shdw);
+}
+
+/*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~ Create the S2 collection, remove clouds and shadows, mask the collection
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/
+// Create the collection, apply the cloud mask.
+var sentinelCollection = get_s2_sr_cld_col(homeRange_PH, startDate, endDate)
+                                          .map(add_cld_shdw_mask)
+                                          .map(apply_cld_shdw_mask);
+
+print('sentinelCollection', sentinelCollection);
+// Map.addLayer(sentinelCollection, {bands: ['swir1'], min: 0, max: 3000}, 'sentinelCollection - swir1',false);
+// Map.addLayer(sentinelCollection, {bands: ['swir1', 'nir', 'red'], min: 0, max: 3000}, 'sentinelCollection');
+
+/*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~ Define the spectral indices to use
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/
+var mappingFunctions = { 
+  applyNDWI: function(image) {
+    // apply NDWI to an image
+    var ndwi = image.normalizedDifference(['green','nir']).rename('ndwi');
+    return ndwi.select(['ndwi']);
+  },
+
+  applyNDVI: function(image) {
+    // apply NDVI to an image
+    var ndvi = image.normalizedDifference(['nir','red']).rename('ndvi');
+    return ndvi.select([0], ['ndv']);
+  },
+ 
+  applyEVI: function(image) {
+    var evi = image.expression("evi = 2.5*(b('nir')-b('red'))/(b('nir')+6*b('red') - 7.5*b('blue') + 1)").rename('evi');
+    return evi;
+  },
+  
+  applySAVI: function(image) {
+    var savi = image.expression("(1.5*(b('nir')-b('red')))/(b('nir')+b('red')+0.5)").rename('savi');
+    return savi;
+  },
+
+  applyMIR: function(image) {
+    var mir = image.expression("b('swir1')/b('nir')").rename('mir');
+    return mir;
+  },
+
+  applyBSI: function(image) {
+    var bsi = image.expression("((b('swir1')+b('red'))-(b('nir')+b('blue')))/((b('swir1')+b('red'))+(b('nir')+b('blue')))")
+                    .rename('bsi');
+    return bsi;
+  },
+
+  applyNDMI: function(image) {
+    var ndmi = image.normalizedDifference(['nir', 'swir1']).rename('ndmi');
+    return ndmi;
+  },
+  
+  applyGNDVI: function(image) { //green Normalized Difference Vegetation Index
+    var gndvi = image.normalizedDifference(['nir', 'green']).rename('gndvi');
+    return gndvi;
+  }, //Kamenova(2021) doi:10.1080/22797254.2020.1839359, 
+    
+  applyNDRE: function(image) { //Normalized Difference Red Edge (NDRE)
+    var ndre = image.normalizedDifference(['redEdge2', 'redEdge1']).rename('ndre');
+    return ndre;
+  }, //doi:10.1080/22797254.2020.1839359, https://doi.org/10.1016/j.rse.2020.112122
+
+  applyRENDVI: function(image) { //red edge Normalized Difference Vegetation Index (reNDVI)
+    var rendvi = image.normalizedDifference(['redEdge4', 'redEdge2']).rename('rendvi');
+    return rendvi;
+  },//doi:10.1080/22797254.2020.1839359
+    
+  applyVARI: function(image) { //Visible Atmospherically Resistant Index (VARI))
+    var vari = image.expression("(b('green')-b('red'))/(b('green')+b('red')-b('blue'))").rename('vari');
+    return vari;
+  },//doi:10.1080/22797254.2020.1839359
+    
+  applyMCARI: function(image) { //Visible Atmospherically Resistant Index (VARI))
+    var mcari = image.expression("((b('redEdge1')-b('red'))-0.2*(b('redEdge1')-b('green')))*(b('redEdge1')/b('red'))")
+                      .rename('mcari');
+    return mcari;
+  },//doi:10.1080/22797254.2020.1839359, https://doi.org/10.1016/j.rse.2020.112122
+};
+
+
+/*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~ Create the covariates from the sentinelCollection, and apply the reducers
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/
+// Reduce image collection to per band metrics
+var reducer = ee.Reducer.min()
+    .combine(ee.Reducer.max(), '', true)
+    .combine(ee.Reducer.median().setOutputs(['med']), '', true)
+    .combine(ee.Reducer.intervalMean(25, 75).setOutputs(['2575']), '', true)
+    .combine(ee.Reducer.intervalMean(0, 20).setOutputs(['0020']), '', true)
+    .combine(ee.Reducer.intervalMean(80, 100).setOutputs(['80100']), '', true);
+
+
+var parallelScale = 8;
+var covariates = {
+  ndwi: sentinelCollection.map(mappingFunctions.applyNDWI)
+      .reduce(reducer, parallelScale),
+  ndvi: sentinelCollection.map(mappingFunctions.applyNDVI)
+      .reduce(reducer, parallelScale),
+  evi: sentinelCollection.map(mappingFunctions.applyEVI)
+      .reduce(reducer, parallelScale),
+  ndmi: sentinelCollection.map(mappingFunctions.applyNDMI)
+      .reduce(reducer, parallelScale),
+  bsi: sentinelCollection.map(mappingFunctions.applyBSI)
+      .reduce(reducer, parallelScale),
+  mir: sentinelCollection.map(mappingFunctions.applyMIR)
+      .reduce(reducer, parallelScale),
+  savi: sentinelCollection.map(mappingFunctions.applySAVI)
+      .reduce(reducer, parallelScale),
+  gndvi: sentinelCollection.map(mappingFunctions.applyGNDVI)
+      .reduce(reducer, parallelScale),
+  ndre: sentinelCollection.map(mappingFunctions.applyNDRE)
+      .reduce(reducer, parallelScale),
+  rendvi: sentinelCollection.map(mappingFunctions.applyRENDVI)
+      .reduce(reducer, parallelScale),
+  vari: sentinelCollection.map(mappingFunctions.applyVARI)
+      .reduce(reducer, parallelScale),
+  mcari: sentinelCollection.map(mappingFunctions.applyMCARI)
+      .reduce(reducer, parallelScale),
+  blue: sentinelCollection.select(['blue']).reduce(reducer, parallelScale),
+  green: sentinelCollection.select(['green']).reduce(reducer, parallelScale),							  
+  red: sentinelCollection.select(['red']).reduce(reducer, parallelScale),							  
+  redEdge1: sentinelCollection.select(['redEdge1']).reduce(reducer, parallelScale),							  
+  redEdge2: sentinelCollection.select(['redEdge2']).reduce(reducer, parallelScale),							  
+  redEdge3: sentinelCollection.select(['redEdge3']).reduce(reducer, parallelScale),							  
+  nir: sentinelCollection.select(['nir']).reduce(reducer, parallelScale),							  
+  redEdge4: sentinelCollection.select(['redEdge4']).reduce(reducer, parallelScale),							  
+  swir1: sentinelCollection.select(['swir1']).reduce(reducer, parallelScale),							  
+  swir2: sentinelCollection.select(['swir2']).reduce(reducer, parallelScale),
+};
+
+/*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~ Prepare the covariates to be exported
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/
+// create a band For each spectral index:
+var ndwiToExport = covariates.ndwi.float(); 
+var ndviToExport = covariates.ndvi.float(); 
+var eviToExport = covariates.evi.float(); 
+var ndmiToExport = covariates.ndmi.float(); 
+var bsiToExport = covariates.bsi.float(); 
+var mirToExport = covariates.mir.float(); 
+var saviToExport = covariates.savi.float(); 
+var gndviToExport = covariates.gndvi.float(); 
+var ndreToExport = covariates.ndre.float(); 
+var rendviToExport = covariates.rendvi.float(); 
+var variToExport = covariates.vari.float();
+var mcariToExport = covariates.mcari.float();
+var blueToExport = covariates.blue.float(); 
+var greenToExport = covariates.green.float(); 
+var redToExport = covariates.red.float(); 
+var redEdge1ToExport = covariates.redEdge1.float(); 
+var redEdge2ToExport = covariates.redEdge2.float(); 
+var redEdge3ToExport = covariates.redEdge3.float(); 
+var nirToExport = covariates.nir.float(); 
+var redEdge4ToExport = covariates.redEdge4.float(); 
+var swir1ToExport = covariates.swir1.float(); 
+var swir2ToExport = covariates.swir2.float(); 
+
+// add the absolute value band to each index, then clip and mask with forest loss.
+ndwiToExport = ndwiToExport.addBands(ndwiToExport.select("ndwi_max")
+                          .subtract(ndwiToExport.select("ndwi_min")).rename('ndwi_abs'))
+                          .clip(homeRange_PH).mask(loss);
+ndviToExport = ndviToExport.addBands(ndviToExport.select("ndv_max")
+                          .subtract(ndviToExport.select("ndv_min")).rename('ndvi_abs'))
+                          .clip(homeRange_PH).mask(loss);
+eviToExport = eviToExport.addBands(eviToExport.select("evi_max")
+                          .subtract(eviToExport.select("evi_min")).rename('evi_abs'))
+                          .clip(homeRange_PH).mask(loss);
+ndmiToExport = ndmiToExport.addBands(ndmiToExport.select("ndmi_max")
+                          .subtract(ndmiToExport.select("ndmi_min")).rename('ndmi_abs'))
+                          .clip(homeRange_PH).mask(loss);							
+bsiToExport = bsiToExport.addBands(bsiToExport.select("bsi_max")
+                          .subtract(bsiToExport.select("bsi_min")).rename('bsi_abs'))
+                          .clip(homeRange_PH).mask(loss);							
+mirToExport = mirToExport.addBands(mirToExport.select("mir_max")
+                          .subtract(mirToExport.select("mir_min")).rename('mir_abs'))
+                          .clip(homeRange_PH).mask(loss);							
+saviToExport = saviToExport.addBands(saviToExport.select("savi_max")
+                          .subtract(saviToExport.select("savi_min")).rename('savi_abs'))
+                          .clip(homeRange_PH).mask(loss);
+gndviToExport = gndviToExport.addBands(gndviToExport.select("gndvi_max")
+                          .subtract(gndviToExport.select("gndvi_min")).rename('gndvi_abs'))
+                          .clip(homeRange_PH).mask(loss);	
+ndreToExport = ndreToExport.addBands(ndreToExport.select("ndre_max")
+                          .subtract(ndreToExport.select("ndre_min")).rename('ndre_abs'))
+                          .clip(homeRange_PH).mask(loss);	
+rendviToExport = rendviToExport.addBands(rendviToExport.select("rendvi_max")
+                          .subtract(rendviToExport.select("rendvi_min")).rename('rendvi_abs'))
+                          .clip(homeRange_PH).mask(loss);							  
+variToExport = variToExport.addBands(variToExport.select("vari_max")
+                          .subtract(variToExport.select("vari_min")).rename('vari_abs'))
+                          .clip(homeRange_PH).mask(loss);	
+mcariToExport = mcariToExport.addBands(mcariToExport.select("mcari_max")
+                          .subtract(mcariToExport.select("mcari_min")).rename('mcari_abs'))
+                          .clip(homeRange_PH).mask(loss);
+blueToExport = blueToExport.addBands(blueToExport.select("blue_max")
+                          .subtract(blueToExport.select("blue_min")).rename('blue_abs'))
+                          .clip(homeRange_PH).mask(loss);
+greenToExport = greenToExport.addBands(greenToExport.select("green_max")
+                          .subtract(greenToExport.select("green_min")).rename('green_abs'))
+                          .clip(homeRange_PH).mask(loss);
+redToExport = redToExport.addBands(redToExport.select("red_max")
+                          .subtract(redToExport.select("red_min")).rename('red_abs'))
+                          .clip(homeRange_PH).mask(loss);
+redEdge1ToExport = redEdge1ToExport.addBands(redEdge1ToExport.select("redEdge1_max")
+                          .subtract(redEdge1ToExport.select("redEdge1_min")).rename('redEdge1_abs'))
+                          .clip(homeRange_PH).mask(loss);
+redEdge2ToExport = redEdge2ToExport.addBands(redEdge2ToExport.select("redEdge2_max")
+                          .subtract(redEdge2ToExport.select("redEdge2_min")).rename('redEdge2_abs'))
+                          .clip(homeRange_PH).mask(loss);
+redEdge3ToExport = redEdge3ToExport.addBands(redEdge3ToExport.select("redEdge3_max")
+                          .subtract(redEdge3ToExport.select("redEdge3_min")).rename('redEdge3_abs'))
+                          .clip(homeRange_PH).mask(loss);
+nirToExport = nirToExport.addBands(nirToExport.select("nir_max")
+                          .subtract(nirToExport.select("nir_min")).rename('nir_abs'))
+                          .clip(homeRange_PH).mask(loss);
+redEdge4ToExport = redEdge4ToExport.addBands(redEdge4ToExport.select("redEdge4_max")
+                          .subtract(redEdge4ToExport.select("redEdge4_min")).rename('redEdge4_abs'))
+                          .clip(homeRange_PH).mask(loss);						  
+swir1ToExport = swir1ToExport.addBands(swir1ToExport.select("swir1_max")
+                          .subtract(swir1ToExport.select("swir1_min")).rename('swir1_abs'))
+                          .clip(homeRange_PH).mask(loss);						  
+swir2ToExport = swir2ToExport.addBands(swir2ToExport.select("swir2_max")
+                          .subtract(swir2ToExport.select("swir2_min")).rename('swir2_abs'))
+                          .clip(homeRange_PH).mask(loss);
+
+// Print the new covariates to see if they work correclty and add one to the map.
+print('swir2ToExport',swir2ToExport);
+
+// Adding the spectral indices to the map takes a lot of time at this point. be patient.
+// Map.addLayer(gndviToExport.select('gndvi_max'),{palette: plasmaPalette},'gndvi');
+// Map.addLayer(ndreToExport.select('ndre_max'),{palette: plasmaPalette},'ndre');
+// Map.addLayer(rendviToExport.select('rendvi_max'),{palette: plasmaPalette},'rendvi');
+// Map.addLayer(variToExport.select('vari_max'),{palette: plasmaPalette},'vari');
+// Map.addLayer(mcariToExport.select('mcari_max'),{palette: plasmaPalette},'mcari');
+
+
+/*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~  Export all covariates to assets
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/
+var maskedS2bands = blueToExport.addBands(greenToExport).addBands(redToExport)
+                              .addBands(redEdge1ToExport).addBands(redEdge2ToExport)
+                              .addBands(redEdge3ToExport).addBands(nirToExport)
+                              .addBands(redEdge4ToExport).addBands(swir1ToExport)
+                              .addBands(swir2ToExport);
+
+var maskedS2Covars1 = ndwiToExport.addBands(ndviToExport).addBands(eviToExport)
+                              .addBands(ndmiToExport).addBands(bsiToExport)
+                              .addBands(mirToExport).addBands(saviToExport);
+                              
+var maskedS2Covars2 = gndviToExport.addBands(ndreToExport).addBands(rendviToExport)
+                              .addBands(variToExport).addBands(mcariToExport);
+
+print(maskedS2bands, 'maskedS2bands');
+print(maskedS2Covars1, 'maskedS2Covars1');
+print(maskedS2Covars2, 'maskedS2Covars2');
+
+
+////////////////////////////////////
+// EXPORT 
+////////////////////////////////////
+
+var globOptions = { 
+  versionID: '_v2', 
+  outFolder: 'GEE_outputs',
+  date: '_092021', //mmyyyy
+  outScale: 30, //resolution in metres
+  outScale1: '_30m',//resolution in metres
+};
+
+Export.image.toAsset({
+  image: maskedS2bands,
+  description: 'maskedS2bands'.concat('_2019').concat(globOptions.date).concat(globOptions.outScale1).concat(globOptions.versionID),
+  assetId: 'clean/maskedS2bands'.concat('_2019').concat(globOptions.date).concat(globOptions.outScale1).concat(globOptions.versionID),
+  scale:  globOptions.outScale,
+  region: homeRange_PH,
+  maxPixels: 1e12 
+});
+
+Export.image.toAsset({
+  image: maskedS2Covars1,
+  description: 'maskedS2Covars1'.concat('_2019').concat(globOptions.date).concat(globOptions.outScale1).concat(globOptions.versionID),
+  assetId: 'clean/maskedS2Covars1'.concat('_2019').concat(globOptions.date).concat(globOptions.outScale1).concat(globOptions.versionID),
+  scale:  globOptions.outScale,
+  region: homeRange_PH,
+  maxPixels: 1e12 
+});
+
+Export.image.toAsset({
+  image: maskedS2Covars2,
+  description: 'maskedS2Covars2'.concat('_2019').concat(globOptions.date).concat(globOptions.outScale1).concat(globOptions.versionID),
+  assetId: 'clean/maskedS2Covars2'.concat('_2019').concat(globOptions.date).concat(globOptions.outScale1).concat(globOptions.versionID),
+  scale:  globOptions.outScale,
+  region: homeRange_PH,
+  maxPixels: 1e12 
+});
+
+
+Export.image.toDrive({
+  image: maskedS2bands,
+  description: 'maskedS2bands'.concat('_2019').concat(globOptions.date).concat(globOptions.outScale1).concat(globOptions.versionID),
+  scale: globOptions.outScale, 
+  region: homeRange_PH,
+  maxPixels: 1e12 ,
+  fileFormat: 'GeoTIFF',
+  crs: 'EPSG:4326',
+  folder: 'GEE_outputs',
+  fileNamePrefix: 'maskedS2bands'.concat('_2019').concat(globOptions.date).concat(globOptions.outScale1).concat(globOptions.versionID),
+  });
