@@ -1,0 +1,168 @@
+Google Earth Engine link: https://code.earthengine.google.com/3d0fb79e03c6cbb2c61fd03cc9a5ce94
+Repository created on 19/09/2022
+
+var aoi: aread or interest
+var hansen: 
+  type: Image
+  id: UMD/hansen/global_forest_change_2019_v1_7
+
+Map.centerObject(aoi);
+Map.setOptions('SATELLITE');
+
+// Import external data
+var treeCover2000 = hansen.select(['treecover2000']).mask(lossMask).clip(homeRange_PH); //
+var lossYear = hansen.select(['lossyear']).mask(lossMask); // select the loss year layer 
+var treeCover50pc = treeCover2000.gte(50); // Hansen use >50%, hence we use gt not gte ** ESTEFANIA CHECK THE DEFINITION OF FOREST
+
+// add tree cover data
+Map.addLayer(treeCover2000,{'palette': '000000, 00FF00', 'min': [0], 'max': [100]}, 'Raw Hansen Tree Cover 2000', true);
+Map.addLayer(homeRange_PH, { 'opacity':0.4}, 'IUCN PH Home Range', false);
+
+////////////////////////////////////
+// 001. FOREST LOSS PER YEAR
+////////////////////////////////////
+
+// Aims: 
+// 1. make a new layer for each year showing which pixels were lost in the previous year. Pixel value for forest loss == 1
+// 2. make a new layer for each year showing the cumulative loss (up to that year from the year 2000). Pixel value for forest loss == 1 
+
+var getCumLoss = function(loss1, loss2) {
+  // Function for adding together years of forest loss
+  var cumLoss = loss2.unmask(0).add(loss1.unmask(0));
+  var cumLossb = cumLoss.updateMask(cumLoss);
+  var cumLossc = cumLossb.updateMask(treeCover50pc);
+  return cumLossc;
+};
+
+// Extract individual years for export 
+// 1. Do it for loss (include remap pixel value to 0)
+// 2. Do if for cumulative loss (add together successive years)
+var loss2001 = lossYear.updateMask(lossYear.eq(1)).updateMask(treeCover50pc);
+var loss2002 = lossYear.updateMask(lossYear.eq(2)).remap([2],[1]).updateMask(treeCover50pc);
+var cumLoss2002 = getCumLoss(loss2001,loss2002);
+var loss2003 = lossYear.updateMask(lossYear.eq(3)).remap([3],[1]).updateMask(treeCover50pc);
+var cumLoss2003 = getCumLoss(cumLoss2002,loss2003);
+var loss2004 = lossYear.updateMask(lossYear.eq(4)).remap([4],[1]).updateMask(treeCover50pc);
+var cumLoss2004 = getCumLoss(cumLoss2003,loss2004);
+var loss2005 = lossYear.updateMask(lossYear.eq(5)).remap([5],[1]).updateMask(treeCover50pc);
+var cumLoss2005 = getCumLoss(cumLoss2004,loss2005);
+var loss2006 = lossYear.updateMask(lossYear.eq(6)).remap([6],[1]).updateMask(treeCover50pc);
+var cumLoss2006 = getCumLoss(cumLoss2005,loss2006);
+var loss2007 = lossYear.updateMask(lossYear.eq(7)).remap([7],[1]).updateMask(treeCover50pc);
+var cumLoss2007 = getCumLoss(cumLoss2006,loss2007);
+var loss2008 = lossYear.updateMask(lossYear.eq(8)).remap([8],[1]).updateMask(treeCover50pc);
+var cumLoss2008 = getCumLoss(cumLoss2007,loss2008);
+var loss2009 = lossYear.updateMask(lossYear.eq(9)).remap([9],[1]).updateMask(treeCover50pc);
+var cumLoss2009 = getCumLoss(cumLoss2008,loss2009);
+var loss2010 = lossYear.updateMask(lossYear.eq(10)).remap([10],[1]).updateMask(treeCover50pc);
+var cumLoss2010 = getCumLoss(cumLoss2009,loss2010);
+var loss2011 = lossYear.updateMask(lossYear.eq(11)).remap([11],[1]).updateMask(treeCover50pc);
+var cumLoss2011 = getCumLoss(cumLoss2010,loss2011);
+var loss2012 = lossYear.updateMask(lossYear.eq(12)).remap([12],[1]).updateMask(treeCover50pc);
+var cumLoss2012 = getCumLoss(cumLoss2011,loss2012);
+var loss2013 = lossYear.updateMask(lossYear.eq(13)).remap([13],[1]).updateMask(treeCover50pc);
+var cumLoss2013 = getCumLoss(cumLoss2012,loss2013);
+var loss2014 = lossYear.updateMask(lossYear.eq(14)).remap([14],[1]).updateMask(treeCover50pc);
+var cumLoss2014 = getCumLoss(cumLoss2013,loss2014);
+var loss2015 = lossYear.updateMask(lossYear.eq(15)).remap([15],[1]).updateMask(treeCover50pc);
+var cumLoss2015 = getCumLoss(cumLoss2014,loss2015);
+var loss2016 = lossYear.updateMask(lossYear.eq(16)).remap([16],[1]).updateMask(treeCover50pc);
+var cumLoss2016 = getCumLoss(cumLoss2015,loss2016);
+var loss2017 = lossYear.updateMask(lossYear.eq(17)).remap([17],[1]).updateMask(treeCover50pc);
+var cumLoss2017 = getCumLoss(cumLoss2016,loss2017);
+var loss2018 = lossYear.updateMask(lossYear.eq(18)).remap([18],[1]).updateMask(treeCover50pc);
+var cumLoss2018 = getCumLoss(cumLoss2017,loss2018);
+var loss2019 = lossYear.updateMask(lossYear.eq(19)).remap([19],[1]).updateMask(treeCover50pc);
+var cumLoss2019 = getCumLoss(cumLoss2018,loss2019);
+
+////////////////////////////////////
+// 002. GET ONLY AREAS WHERE LOSS >2 Ha
+////////////////////////////////////
+// https://developers.google.com/earth-engine/tutorials/community/forest-cover-loss-estimation
+
+// 23 px x 30m x30m (dimensions of landsat px) = 20,700m^2 = 1.8Ha
+// Minimum forest area in pixels (e.g. 23 pixels are approximately 2 ha)
+var twoHa = ee.Number(23);
+
+// Use connectedPixelCount() to get contiguous area.
+var cumContArea2019 = cumLoss2019.connectedPixelCount();
+
+// Apply the minimum area requirement (only areas greater than 2ha)
+var cumLossGreaterThan2Ha2019 = cumContArea2019.gte(twoHa).selfMask();
+var cumLossGreater2019 = cumContArea2019.selfMask();
+
+//  now calculate the area (Ha) lost per year
+var cumLossArea2019_2Ha = cumLossGreaterThan2Ha2019.multiply(ee.Image.pixelArea()).divide(10000);
+var cumLossArea2019 = cumLossGreater2019.multiply(ee.Image.pixelArea()).divide(10000);
+
+//  now use the reducer to sum the areas
+var cumAreaLost2019_2Ha = cumLossArea2019_2Ha.reduceRegion({
+    reducer: ee.Reducer.sum(),
+    geometry: homeRange_PH.geometry(),
+    scale: 30,
+    maxPixels: 1e13
+});
+var cumAreaLost2019 = cumLossArea2019.reduceRegion({
+    reducer: ee.Reducer.sum(),
+    geometry: homeRange_PH.geometry(),
+    scale: 30,
+    maxPixels: 1e13
+});
+print('--------- cumulative area lost  -------');
+print('cumulative area lost up to 2019 (km2)', cumAreaLost2019.get("remapped"), 'all patches');
+print('cumulative area lost up to 2019 (km2)', cumAreaLost2019_2Ha.get("remapped"), 'only patches >2Ha');
+
+Map.addLayer(cumLoss2019, {palette:'cyan'},'cumLoss2019',false);
+Map.addLayer(cumLossArea2019_2Ha, {palette:'darkred'},'cumLossArea2019_2Ha',false);
+
+
+////////////////////////////////////
+// 003. EXPORT AREAS OF CUMULATIVE LOSS TO DRIVE and as Asset
+////////////////////////////////////
+
+var globOptions = { 
+  versionID: '_v2', //file name prefix
+  outFolder: 'GEE_outputs',
+  date: '_092021',
+  outScale: 30,
+  outScale1: '_30m',//resolution in metres
+};
+
+
+Export.image.toDrive({
+  image: cumLoss2019,
+  description: 'cumLoss'.concat('_2019').concat(globOptions.date).concat(globOptions.outScale1).concat(globOptions.versionID),
+  folder: globOptions.outFolder,
+  scale: globOptions.outScale,
+  maxPixels: 1e12,
+  skipEmptyTiles: true, 
+  fileFormat: 'GeoTIFF',
+  crs: 'EPSG:4326',
+  });
+
+// Export.image.toDrive({
+//   image: cumLossArea2019_2Ha,
+//   description: 'cumLoss_gte2Ha'.concat('_2019').concat(globOptions.date).concat(globOptions.outScale1).concat(globOptions.versionID),
+//   folder: globOptions.outFolder,
+//   scale: globOptions.outScale,
+//   maxPixels: 1e12,
+//   skipEmptyTiles: true, 
+//   fileFormat: 'GeoTIFF',
+//   crs: 'EPSG:4326',
+//   });
+
+Export.image.toAsset({
+  image: cumLoss2019,
+  description: 'cumLoss_'.concat('_2019').concat(globOptions.date).concat(globOptions.outScale1).concat(globOptions.versionID),
+  assetId: 'cumLoss_'.concat('2019_').concat(globOptions.date).concat(globOptions.outScale1).concat(globOptions.versionID),
+  scale: globOptions.outScale, //CHANGE THIS TO 100 OR MORE, OTHERWISE EXPORT WILL FAIL DUE TO TOO MANY PX
+  maxPixels: 1e12 
+});
+
+// Export.image.toAsset({
+//   image: cumLossArea2019_2Ha,
+//   description: 'cumLoss_gte2Ha'.concat('_2019').concat(globOptions.date).concat(globOptions.outScale1).concat(globOptions.versionID),
+//   assetId: 'cumLoss_gte2Ha'.concat('2019_').concat(globOptions.date).concat(globOptions.outScale1).concat(globOptions.versionID),
+//   scale: globOptions.outScale, //CHANGE THIS TO 100 OR MORE, OTHERWISE EXPORT WILL FAIL DUE TO TOO MANY PX
+//   maxPixels: 1e12 
+// });
