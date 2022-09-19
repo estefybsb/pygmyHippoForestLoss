@@ -1,0 +1,84 @@
+Google Earth Engine code: https://code.earthengine.google.com/69607981781a1615a37381afb7205824
+Repository created on 19/09/2022
+
+var hansen: Image "Hansen Global Forest Change v1.7 (2000-2019) [deprecated]"
+  type: Image
+  id: UMD/hansen/global_forest_change_2019_v1_7
+  version: 1641990740790847
+
+var homeRange_PH:
+
+var S2_3C:
+
+var plantations: ImageCollection "Global Map of Oil Palm Plantations"
+  type: ImageCollection
+  id: BIOPAMA/GlobalOilPalm/v1
+  version: 1641990049966303
+
+
+// Map.centerObject(homeRange_PH,9);
+Map.setOptions('SATELLITE'); 
+// Map.addLayer(homeRange_PH,{},'PH distrib', false);
+
+// Set visualization parameters
+var classificationPalette_3C = [
+'cyan', //red - Anthropogenic
+'magenta', //purple - intensive
+'yellow', //yellow - shifting agric
+];
+
+
+// Find the patches that are have up to 560px, or ~50Ha in size
+var patchSize560 = s2_3c.connectedPixelCount(560, true); // 560px are ~50Ha   
+
+// Create a majority filter. This filter will look witin a 10px radius and asign the  
+// most common value to the center pixel.
+var majorityFilter2 = s2_3c.focal_mode({
+  radius: 10, // can change this tho 5 or 8.
+  kernelType: 'square', // used 'circle' as well, but results were not as good.
+  units: 'pixels',
+});
+
+// Run the majority filter on the classified image, to reduce the 'salt and pepper' effect. 
+// We run the majorityFilter2 only on patches that are smaller than ~50Ha or 560px
+var filtered560_ = s2_3c.where(patchSize560.lt(560), majorityFilter2);
+Map.addLayer(filtered560_,{min:1, max:3, palette: classificationPalette_3C},'filtered560_');
+
+
+///////////////////////////////////////////
+// EXPORT THE smooth IMAGE 
+///////////////////////////////////////////
+
+var globOptions = { 
+  versionID: '_v3', 
+  outFolder: 'GEE_outputs',
+  date: '_20220304',
+  outScale: 100,
+  outScale1: '_100m',//resolution in metres
+};
+
+Export.image.toAsset({
+  image: filtered560_,
+  description: 'smooth_3C_300'.concat('_2019').concat(globOptions.date).concat(globOptions.outScale1).concat(globOptions.versionID),
+  assetId: 'clean/smooth_3C_300'.concat('_2019').concat(globOptions.date).concat(globOptions.outScale1).concat(globOptions.versionID),
+  scale:  globOptions.outScale,
+  region: homeRange_PH,
+  maxPixels: 1e12 
+});
+
+Export.image.toDrive({
+  image: filtered560_,
+  description: 'smooth_3C_300'.concat('_2019').concat(globOptions.date).concat(globOptions.outScale1).concat(globOptions.versionID),
+  scale: globOptions.outScale, 
+  region: homeRange_PH,
+  maxPixels: 1e12 ,
+  fileFormat: 'GeoTIFF',
+  crs: 'EPSG:4326',
+  folder: 'GEE_outputs',
+  fileNamePrefix: 'smooth_3C_300'.concat('_2019').concat(globOptions.date).concat(globOptions.outScale1).concat(globOptions.versionID),
+  });
+
+
+
+
+
