@@ -1,0 +1,459 @@
+Google Earth Engine like: https://code.earthengine.google.com/5f699fa5c1c91b5dfe99385c9508bc88
+repository created on 19/09/2022
+
+var world: Table "LSIB 2017: Large Scale International Boundary Polygons, Simplified"
+  type: FeatureCollection
+  id: USDOS/LSIB_SIMPLE/2017
+  version: 1566850254549599
+
+var protectedAreas: Table "WDPA: World Database on Protected Areas (polygons)"
+  type: FeatureCollection
+  id: WCMC/WDPA/current/polygons
+  version: 1662178365480735
+
+var homeRange_PH
+
+var cumLoss2019:
+
+var s2_3c:
+
+var smooth:
+
+Map.centerObject(homeRange_PH,6);
+Map.setOptions('SATELLITE'); 
+// Map.addLayer(homeRange_PH,{},'PH distrib', false);
+
+// Set visualization parameters
+var classificationPalette_3C = [
+'cyan', //cyan - Anthropogenic
+'purple', //purple - shifting
+'yellow', //yellow - intensive agric
+];
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// Select the countries of interest
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// select the countries that make the UGF
+var country_names = ["IV", "LI", "SL", "GH", "GV"];
+// find the countries in the country list
+var countries = world.filter(ee.Filter.inList('country_co', country_names));
+// Get the geometry of the countries
+var region = countries.geometry();
+// Map.addLayer(region,{},'REGION');
+
+var IV= countries.filterMetadata ('country_co', 'equals', 'IV');
+var LI= countries.filterMetadata ('country_co', 'equals', 'LI');
+var SL= countries.filterMetadata ('country_co', 'equals', 'SL');
+var GV= countries.filterMetadata ('country_co', 'equals', 'GV');
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// Calculate the total areas of forest loss
+// Source: https://developers.google.com/earth-engine/tutorials/tutorial_forest_03?hl=en
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// Calculate the area of loss pixels for each driver.
+// These values are the same as those presented below when
+// using a different method
+
+print('CALCULATE AREAS AT 30M/PIXEL');
+
+// first we select the driver, then calculate the area
+// we can do this for the classified image (s2_3c) or the smooth image (smooth)
+
+// var anthr = s2_3c.select(['classification']).eq(1);
+var anthr = smooth.select(['classification']).eq(1);
+var anthrArea = anthr.multiply(ee.Image.pixelArea());
+
+// var subsistence = s2_3c.select(['classification']).eq(2);
+var subsistence = smooth.select(['classification']).eq(2);
+var subArea = subsistence.multiply(ee.Image.pixelArea());
+
+// var intensive = s2_3c.select(['classification']).eq(3);
+var intensive = smooth.select(['classification']).eq(3);
+var intArea = intensive.multiply(ee.Image.pixelArea());
+
+// var totalarea = s2_3c.select(['classification']).gte(1);
+var totalarea = smooth.select(['classification']).gte(1);
+var allArea = totalarea.multiply(ee.Image.pixelArea());
+
+var anthrStats = anthrArea.reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: homeRange_PH.geometry(),
+  scale: 30,
+  maxPixels: 1e12
+});
+print(
+  'Forest lost to settlements :',
+  anthrStats.get('classification'),
+  'square meters'
+);
+
+var subStats = subArea.reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: homeRange_PH.geometry(),
+  scale: 30,
+  maxPixels: 1e12
+});
+print(
+  'Forest lost to subsistence ag:',
+  subStats.get('classification'),
+  'square meters'
+);
+
+var intStats = intArea.reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: homeRange_PH.geometry(),
+  scale: 30,
+  maxPixels: 1e12
+});
+print(
+  'Forest  lost to intensive ag:',
+  intStats.get('classification'),
+  'square meters'
+);
+
+///////////////////////////////////////////////////////////////////////////////
+// COMPARE THE AREAS OF HANSEN LOSS VS CLASSIFIED LOSS
+///////////////////////////////////////////////////////////////////////////////
+var allStats = allArea.reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: homeRange_PH.geometry(),
+  scale: 30,
+  maxPixels: 1e12
+});
+print(
+  'total Forest area lost in the PH distribution:',
+  allStats.get('classification'),
+  'square meters'
+);
+
+var totalarea2 = cumLoss2019.select(['remapped']).gte(1);
+var allArea2 = totalarea2.multiply(ee.Image.pixelArea());
+var allStats2 = allArea2.reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: homeRange_PH.geometry(),
+  scale: 30,
+  maxPixels: 1e12
+});
+print(
+  'total Forest area lost in the PH distribution:',
+  allStats2.get('remapped'),
+  'square meters'
+);
+
+/////////////////////////////////////////////////////////////////////////////////
+
+// Now do the same calculation in a slightly different way (same source: spatial thoughts)
+// We take the ee.Image.pixelArea() image and add the classified image as a new band
+// This band will be used by the grouped reduced to categorize the results
+// var areaImage = ee.Image.pixelArea().addBands(s2_3c);
+var areaImage = ee.Image.pixelArea().addBands(smooth);
+
+var areas = areaImage.reduceRegion({
+      reducer: ee.Reducer.sum().group({
+      groupField: 1,
+      groupName: 'classification',
+    }),
+    geometry: homeRange_PH.geometry(),
+    scale: 30,
+    maxPixels: 1e10
+    }); 
+print('total area of each class (m2)',areas);
+
+// The result of reduceRegion() with a grouped reducer is a dictionary of dictionaries for each class
+// The top level dictionary has a single key named 'groups'
+// We can extract the individual dictionaries and merge them into a single one
+var classAreas = ee.List(areas.get('groups'));
+
+//Apply a function using .map() function to iterate over each class item
+//We extract the class and area numbers and return a list for each class
+//The result is a list of lists
+
+// Important to note that dictionary key must be of type 'string'
+// Our keys are class numbers, so we call .format() to convert the number to string
+var classAreaLists = classAreas.map(function(item) {
+  var areaDict = ee.Dictionary(item);
+  var classNumber = ee.Number(areaDict.get('classification')).format();
+  var area = ee.Number(areaDict.get('sum')).divide(1e6).round();
+  return ee.List([classNumber, area]);
+});
+// print(classAreaLists);
+
+// So before creating a dictionary with nested objects, we must convert them to flat structures
+// We can now create a dictionary using ee.Dictionary which accepts a list of key/value pairs
+var result = ee.Dictionary(classAreaLists.flatten());
+print('area of each class in km2',result);
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// Calculate areas of each driver per country
+// following the same procedure as above 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+print('---the areas of forest loss per driver in Ivory Coast are:');
+var areas = areaImage.reduceRegion({
+      reducer: ee.Reducer.sum().group({
+      groupField: 1,
+      groupName: 'classification',
+    }),
+    geometry: IV.geometry(),
+    scale: 30,
+    maxPixels: 1e10
+    }); 
+// print('total area of each class (m2)',areas);
+
+var classAreas = ee.List(areas.get('groups'));
+
+var classAreaLists = classAreas.map(function(item) {
+  var areaDict = ee.Dictionary(item);
+  var classNumber = ee.Number(areaDict.get('classification')).format();
+  var area = ee.Number(areaDict.get('sum')).divide(1e6).round();
+  return ee.List([classNumber, area]);
+});
+
+var result = ee.Dictionary(classAreaLists.flatten());
+print('area of each driver in Ivory Coast in km2',result);
+
+print('---the areas of forest loss per driver in LIBERIA are:');
+var areas = areaImage.reduceRegion({
+      reducer: ee.Reducer.sum().group({
+      groupField: 1,
+      groupName: 'classification',
+    }),
+    geometry: LI.geometry(),
+    scale: 30,
+    maxPixels: 1e10
+    }); 
+// print('total area of each class (m2)',areas);
+
+var classAreas = ee.List(areas.get('groups'));
+
+var classAreaLists = classAreas.map(function(item) {
+  var areaDict = ee.Dictionary(item);
+  var classNumber = ee.Number(areaDict.get('classification')).format();
+  var area = ee.Number(areaDict.get('sum')).divide(1e6).round();
+  return ee.List([classNumber, area]);
+});
+
+var result = ee.Dictionary(classAreaLists.flatten());
+print('area of each driver in LIBERIA in km2',result);
+
+print('---the areas of forest loss per driver in SIERRA LEONE are:');
+var areas = areaImage.reduceRegion({
+      reducer: ee.Reducer.sum().group({
+      groupField: 1,
+      groupName: 'classification',
+    }),
+    geometry: SL.geometry(),
+    scale: 30,
+    maxPixels: 1e10
+    }); 
+// print('total area of each class (m2)',areas);
+
+var classAreas = ee.List(areas.get('groups'));
+
+var classAreaLists = classAreas.map(function(item) {
+  var areaDict = ee.Dictionary(item);
+  var classNumber = ee.Number(areaDict.get('classification')).format();
+  var area = ee.Number(areaDict.get('sum')).divide(1e6).round();
+  return ee.List([classNumber, area]);
+});
+
+var result = ee.Dictionary(classAreaLists.flatten());
+print('area of each driver in SIERRA LEONE in km2',result);
+
+print('---the areas of forest loss per driver in GUINEA are:');
+var areas = areaImage.reduceRegion({
+      reducer: ee.Reducer.sum().group({
+      groupField: 1,
+      groupName: 'classification',
+    }),
+    geometry: GV.geometry(),
+    scale: 30,
+    maxPixels: 1e10
+    }); 
+// print('total area of each class (m2)',areas);
+
+var classAreas = ee.List(areas.get('groups'));
+
+var classAreaLists = classAreas.map(function(item) {
+  var areaDict = ee.Dictionary(item);
+  var classNumber = ee.Number(areaDict.get('classification')).format();
+  var area = ee.Number(areaDict.get('sum')).divide(1e6).round();
+  return ee.List([classNumber, area]);
+});
+
+var result = ee.Dictionary(classAreaLists.flatten());
+print('area of each driver in GUINEA in km2',result);
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// Calculate areas of each driver within the Protected areas of each country
+// following the same procedure as above 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+// Get the PAs of each country, but only the ones that have 'STATUS' = 'Designated'
+// First, filter by country, and select the ones within the PH distribution
+var PA_IV = protectedAreas.filterBounds(IV).filterBounds(homeRange_PH);
+var PA_GV = protectedAreas.filterBounds(GV).filterBounds(homeRange_PH);
+var PA_LI = protectedAreas.filterBounds(LI).filterBounds(homeRange_PH);
+var PA_SL = protectedAreas.filterBounds(SL).filterBounds(homeRange_PH);
+
+// Now select only the ones that have 'Status' = 'Designated'
+PA_IV = PA_IV.filter(ee.Filter.stringContains('STATUS', 'Designated'));
+PA_GV = PA_GV.filter(ee.Filter.stringContains('STATUS', 'Designated'));
+PA_LI = PA_LI.filter(ee.Filter.stringContains('STATUS', 'Designated'));
+PA_SL = PA_SL.filter(ee.Filter.stringContains('STATUS', 'Designated'));
+
+// print(PA_IV);
+// Map.addLayer(PA_IV, {}, 'PA_IV');
+
+// Now calculate the areas of each driver within the PAs of each country,
+// using the procedure above
+print('---the areas of forest loss per driver within PAS in Ivory Coast are:');
+var areas = areaImage.reduceRegion({
+      reducer: ee.Reducer.sum().group({
+      groupField: 1,
+      groupName: 'classification',
+    }),
+    geometry: PA_IV.geometry(),
+    scale: 30,
+    maxPixels: 1e10
+    }); 
+// print('total area of each class (m2)',areas);
+
+var classAreas = ee.List(areas.get('groups'));
+
+var classAreaLists = classAreas.map(function(item) {
+  var areaDict = ee.Dictionary(item);
+  var classNumber = ee.Number(areaDict.get('classification')).format();
+  var area = ee.Number(areaDict.get('sum')).divide(1e6).round();
+  return ee.List([classNumber, area]);
+});
+
+var result = ee.Dictionary(classAreaLists.flatten());
+print('area of each driver within the PAs of in Ivory Coast in km2',result);
+
+print('---the areas of forest loss per driver within PAS  in LIBERIA are:');
+var areas = areaImage.reduceRegion({
+      reducer: ee.Reducer.sum().group({
+      groupField: 1,
+      groupName: 'classification',
+    }),
+    geometry: PA_LI.geometry(),
+    scale: 30,
+    maxPixels: 1e10
+    }); 
+// print('total area of each class (m2)',areas);
+
+var classAreas = ee.List(areas.get('groups'));
+
+var classAreaLists = classAreas.map(function(item) {
+  var areaDict = ee.Dictionary(item);
+  var classNumber = ee.Number(areaDict.get('classification')).format();
+  var area = ee.Number(areaDict.get('sum')).divide(1e6).round();
+  return ee.List([classNumber, area]);
+});
+
+var result = ee.Dictionary(classAreaLists.flatten());
+print('area of each driver within the PAs of LIBERIA in km2',result);
+
+print('---the areas of forest loss per driver within PAS in SIERRA LEONE are:');
+var areas = areaImage.reduceRegion({
+      reducer: ee.Reducer.sum().group({
+      groupField: 1,
+      groupName: 'classification',
+    }),
+    geometry: PA_SL.geometry(),
+    scale: 30,
+    maxPixels: 1e10
+    }); 
+// print('total area of each class (m2)',areas);
+
+var classAreas = ee.List(areas.get('groups'));
+
+var classAreaLists = classAreas.map(function(item) {
+  var areaDict = ee.Dictionary(item);
+  var classNumber = ee.Number(areaDict.get('classification')).format();
+  var area = ee.Number(areaDict.get('sum')).divide(1e6).round();
+  return ee.List([classNumber, area]);
+});
+
+var result = ee.Dictionary(classAreaLists.flatten());
+print('area of each driver within the PAs of SIERRA LEONE in km2',result);
+
+print('---the areas of forest loss per driver within PAS  in GUINEA are:');
+var areas = areaImage.reduceRegion({
+      reducer: ee.Reducer.sum().group({
+      groupField: 1,
+      groupName: 'classification',
+    }),
+    geometry: PA_GV.geometry(),
+    scale: 30,
+    maxPixels: 1e10
+    }); 
+// print('total area of each class (m2)',areas);
+
+var classAreas = ee.List(areas.get('groups'));
+
+var classAreaLists = classAreas.map(function(item) {
+  var areaDict = ee.Dictionary(item);
+  var classNumber = ee.Number(areaDict.get('classification')).format();
+  var area = ee.Number(areaDict.get('sum')).divide(1e6).round();
+  return ee.List([classNumber, area]);
+});
+
+var result = ee.Dictionary(classAreaLists.flatten());
+print('area of each driver within the PAs of GUINEA in km2',result);
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// Calculate original area of forest, and total forest loss in the PH distribution 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+var treeCover2000 = hansen.select(['treecover2000']).clip(homeRange_PH); //
+var treeCover50pc = treeCover2000.gte(50); 
+
+// print(treeCover50pc,'treeCover50pc');
+// print(treeCover2000,'treeCover2000');
+
+var treeCover50pcArea = treeCover50pc.multiply(ee.Image.pixelArea());
+var totalTreeCoverArea = treeCover2000.multiply(ee.Image.pixelArea());
+
+print('---the original area of forest w/50% canopy:');
+var forestsStats = treeCover50pcArea.reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: homeRange_PH.geometry(),
+  scale: 30,
+  maxPixels: 1e12
+});
+print(
+  'original (2000) area of forest w/50% canopy was:',
+  ee.Number(forestsStats.get('treecover2000')).divide(1e6).round(),
+  'square km'
+);
+// print('forestsStats',forestsStats)
+
+// to estimate the area of the PH distribution we use all pixels with >1% canopy cover in
+// Hansen's map. This eliminates pixels of water, etc.
+var treeCover1pc = treeCover2000.gte(1); 
+var treeCover1pcArea = treeCover1pc.multiply(ee.Image.pixelArea());
+print('---the original area of forest w/50% canopy:');
+var forests1pcStats = treeCover1pcArea.reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: homeRange_PH.geometry(),
+  scale: 30,
+  maxPixels: 1e12
+});
+print(
+  'original (2000) area of forest w/1% canopy was:',
+  ee.Number(forests1pcStats.get('treecover2000')).divide(1e6).round(),
+  'square km'
+);
+Map.addLayer(treeCover1pc,{},'treeCover1pc');
+
+Map.addLayer(countries,{},'countries');
+Map.addLayer(treeCover2000,{},'treeCover2000');
+Map.addLayer(treeCover50pc,{},'treeCover50pc');
+Map.addLayer(cumLoss2019,{palette:'darkred'},'cumLoss2019');
+Map.addLayer(s2_3c,{min:1, max:3,palette:classificationPalette_3C},'s2_3c');
+Map.addLayer(smooth,{min:1, max:3,palette:classificationPalette_3C},'smooth image');
+Map.addLayer(protectedAreas,{}, 'PAs');
+Map.addLayer(homeRange_PH,{}, 'PH');
+
+
+
