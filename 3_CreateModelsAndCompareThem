@@ -1,5 +1,288 @@
 Google Earth Engine code: https://code.earthengine.google.com/698c8fc81ec55fe2da3d79aeed478526
-Repo
+Repository created on 19/09/2022
+
+Map.centerObject(homeRange_PH, 7); 
+Map.setOptions('SATELLITE'); 
+Map.addLayer(homeRange_PH,{},'home range ph', false);
+Map.addLayer(loss,{palette:'pink'},'loss');
+
+// Set visualization parameters 
+var classificationPalette_3C = [
+'cyan', //red - Settlement and bare soil
+'magenta', //cyan - Subsistance agriculture and grazzing
+'yellow', //yellow - Intensive agriculture
+// 'purple', // cyan - regrowth or false loss (i.e. no forest loss)
+];
+
+// var palettes = require('users/gena/packages:palettes');
+var viridis = ['#440154','#433982','#30678D','#218F8B','#36B677','#8ED542','#FDE725'];//palettes.matplotlib.viridis[7];
+var plasma = ['#0D0887','#5B02A3','#9A179B','#CB4678','#EB7852','#FBB32F','#F0F921'];//palettes.matplotlib.plasma[7];
+
+/*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~ Merge the Landsat image collection with the covariates 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/
+var plantations = plantations.select(['classification'],['plantations']); //rename the band for easier use
+// Map.addLayer(plantations,{  min: 1,  max: 3,  palette: ['ff0000','ef00ff', '696969']}, 'plantations');
+// mask  non-oil palm plantation class pixels.
+plantations = plantations.neq(3).selfMask();
+// print('plantations',plantations)
+Map.addLayer(plantations,{}, 'plantations masked');
+
+// Map.addLayer(builtup,{}, 'builtup');
+// Map.addLayer(urbanization,{}, 'urbanization');
+// Map.addLayer(image,{}, 'image');
+// Map.addLayer(image2,{}, 'image2');
+// Map.addLayer(image3,{}, 'image3');
+
+var collection = ee.ImageCollection([
+              image.addBands(image2).addBands(image3)]).mosaic();
+
+collection = collection.addBands(builtup) //from GHSL built up areas
+                        .addBands(plantations) //from oil palm plantations layer
+                        .addBands(urbanization); // from GHSL urbanization;
+// print('collection', collection);
+
+
+// Select onlty the layers that have proven the most useful
+var minMaxIndices = ['ndwi_min','ndwi_max',
+                  'ndv_min','ndv_max',
+                  'ndmi_min','ndmi_max',
+                  'bsi_min','bsi_max',
+                  'mir_min','mir_max',
+                  'ndre_min','ndre_max',
+                  'vari_min','vari_max',
+                  'mcari_min','mcari_max',
+                  'swir1_min','swir1_max',
+                  // add a couple of bands to improve the classificaton accuracy
+                  'redEdge1_max',//'redEdge1_med',
+                  'nir_max','redEdge2_max',
+                  "smod_code","built",/*"plantations"*/];
+
+collection = collection.select(minMaxIndices);
+// print('collection.select(indexBands)',collection);
+// Map.addLayer(collection.select('mcari_min'), {palette:viridis}, 'collection.select(mcari_min)');
+
+/*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~ Split the sample points for training and validation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/
+var sample = mergedTable_total.randomColumn();
+var split = 0.80;  // Use ~80% of the pts for training, 20% testing.
+
+// Split the points into 'training' and 'testing' sets
+var trainingPts = sample.filter(ee.Filter.lt('random', split));
+var validationPts = sample.filter(ee.Filter.gte('random', split));
+
+// add the training and validation pts to the map
+Map.addLayer(trainingPts, {color:'red', }, 'trainingPts - red', false);
+Map.addLayer(validationPts, {color:'blue', }, 'validationPts - blue', false);
+
+// Overlay the TRAINING points on the imagery to exctract covariate values
+var training3C = collection.sampleRegions({
+  collection: trainingPts,
+  properties: ['Class'], // 
+  scale: 30
+});
+
+/*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~ Make a Random Forest classifier and train it with the training pts
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/
+// From previous tests, the most accurate classifier is a RF w/300 trees.
+// 3 classess
+var trained3C_RF300 = ee.Classifier.smileRandomForest(300).train({ 
+      features: training3C, 
+      classProperty: 'Class',
+      inputProperties: minMaxIndices});
+// print('trained3C_RF300',trained3C_RF300);
+
+/*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~ Classify the image using each RF classifier.
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/
+// 3 classess
+var classified300_3C = collection.classify(trained3C_RF300);
+// print('classified300_3C',classified300_3C);
+
+var confMatrix = trained3C_RF300.confusionMatrix();
+var OA = confMatrix.accuracy();
+var CA = confMatrix.consumersAccuracy();
+var Kappa = confMatrix.kappa();
+var Order = confMatrix.order();
+var PA = confMatrix.producersAccuracy();
+print('confMatrix', confMatrix);
+print(confMatrix,'Confusion Matrix');
+print(OA,'Overall Accuracy');
+print(CA,'Consumers Accuracy');
+print(Kappa,'Kappa');
+print(Order,'Order');
+print(PA,'Producers Accuracy');
+
+Map.addLayer(classified300_3C.select('classification'),{
+  min:1, max:3, palette: classificationPalette_3C},'classified300_3C');
+
+
+/*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~ Now use the VALIDATION points to see how well each classifier works:
+we test the accuracy of the classifier using the validation pts.
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/
+// Overlay the VALIDATION points on the classified image and extract the class
+// 3 classess
+var validationPts_3C = collection.select(minMaxIndices).sampleRegions({
+  collection: validationPts,
+  properties: ['Class'],
+  scale: 30
+});
+
+// Get the error matrix and print the accuracy of each classifier
+
+var validated300_3C = validationPts_3C.classify(trained3C_RF300);
+var testAccuracy300_3C = validated300_3C.errorMatrix('Class', 'classification');
+print('Validation300_3C overall accuracy: ', testAccuracy300_3C.accuracy());
+print('Validation300_3C kappa: ', testAccuracy300_3C.kappa());
+print('Validation300_3C producersAccuracy: ', testAccuracy300_3C.producersAccuracy());
+print('Validation300_3C consumersAccuracy: ', testAccuracy300_3C.consumersAccuracy());
+print('Validation300_3C error matrix: ', testAccuracy300_3C);
+
+
+/*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~ Lets see how many random forests are needed to get a good accuracy
+~~~~~ USING 4 CLASSES 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/
+// Make a Random Forest classifier and train it with 77% of the pts
+var trained_3C_RF10 = ee.Classifier.smileRandomForest(10).train({
+      features: training3C, 
+      classProperty: 'Class',
+      inputProperties: minMaxIndices});
+// print('trained_34_RF10', trained_4_RF10);
+
+var trained_3C_RF50 = ee.Classifier.smileRandomForest(50).train({
+      features: training3C, 
+      classProperty: 'Class',
+      inputProperties: minMaxIndices});
+// print('trained_3C_RF50', trained_3C_RF50);
+
+var trained_3C_RF100 = ee.Classifier.smileRandomForest(100).train({
+      features: training3C, 
+      classProperty: 'Class',
+      inputProperties: minMaxIndices});
+// print('trained_3C_RF100', trained_3C_RF100);
+
+var trained_3C_RF200 = ee.Classifier.smileRandomForest(200).train({
+      features: training3C, 
+      classProperty: 'Class',
+      inputProperties: minMaxIndices});
+// print('trained_3C_RF200', trained_3C_RF200);
+
+var trained_3C_RF300 = ee.Classifier.smileRandomForest(300).train({
+      features: training3C, 
+      classProperty: 'Class',
+      inputProperties: minMaxIndices});
+
+var trained_3C_RF400 = ee.Classifier.smileRandomForest(400).train({
+      features: training3C, 
+      classProperty: 'Class',
+      inputProperties: minMaxIndices});
+
+var trained_3C_RF500 = ee.Classifier.smileRandomForest(500).train({
+      features: training3C, 
+      classProperty: 'Class',
+      inputProperties: minMaxIndices});
+
+// Classify the image with the same bands used for training3C.
+var classified_3C_10 = collection.select(minMaxIndices).classify(trained_3C_RF10);
+var classified_3C_50 = collection.select(minMaxIndices).classify(trained_3C_RF50);
+var classified_3C_100 = collection.select(minMaxIndices).classify(trained_3C_RF100);
+var classified_3C_200 = collection.select(minMaxIndices).classify(trained_3C_RF200);
+var classified_3C_300 = collection.select(minMaxIndices).classify(trained_3C_RF300);
+var classified_3C_400 = collection.select(minMaxIndices).classify(trained_3C_RF400);
+var classified_3C_500 = collection.select(minMaxIndices).classify(trained_3C_RF500);
+// print('classified_3C_500',classified_3C_500)
+
+/*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~ Accuracy assessment using error Matrix (were the VALIDATION pts correctly classified_3C_?)
+for all classifiers, to know which is 'the best' number of RF
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/
+var validationPts3C = collection.select(minMaxIndices).sampleRegions({
+  collection: validationPts,
+  properties: ['Class'],
+  scale: 30
+});
+
+print('---validation using 3 classes---');
+
+// Classify the validation data.
+var validated_3C_300 = validationPts_3C.classify(trained_3C_RF300);
+var testAccuracy_3C_300 = validated_3C_300.errorMatrix('Class', 'classification');
+print('Validation300 overall accuracy: ', testAccuracy_3C_300.accuracy());
+
+var validated_3C_10 = validationPts_3C.classify(trained_3C_RF10);
+var testAccuracy_3C_10 = validated_3C_10.errorMatrix('Class', 'classification');
+print('Validation10 overall accuracy: ', testAccuracy_3C_10.accuracy());
+
+var validated_3C_50 = validationPts_3C.classify(trained_3C_RF50);
+var testAccuracy_3C_50 = validated_3C_50.errorMatrix('Class', 'classification');
+print('Validation50 overall accuracy: ', testAccuracy_3C_50.accuracy());
+
+var validated_3C_100 = validationPts_3C.classify(trained_3C_RF100);
+var testAccuracy_3C_100 = validated_3C_100.errorMatrix('Class', 'classification');
+print('Validation100 overall accuracy: ', testAccuracy_3C_100.accuracy());
+
+var validated_3C_200 = validationPts_3C.classify(trained_3C_RF200);
+var testAccuracy_3C_200 = validated_3C_200.errorMatrix('Class', 'classification');
+print('Validation200 overall accuracy: ', testAccuracy_3C_200.accuracy());
+
+var validated_3C_400 = validationPts_3C.classify(trained_3C_RF400);
+var testAccuracy_3C_400 = validated_3C_400.errorMatrix('Class', 'classification');
+print('Validation400 overall accuracy: ', testAccuracy_3C_400.accuracy());
+
+var validated_3C_500 = validationPts_3C.classify(trained_3C_RF500);
+var testAccuracy_3C_500 = validated_3C_500.errorMatrix('Class', 'classification');
+print('Validation500 overall accuracy: ', testAccuracy_3C_500.accuracy());
+
+
+
+/*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~ Export the classified image
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/
+
+///////////////////////////////////////////
+// 27/09/2021
+// EXPORT THE IMAGE WITH A 100M SCALE TO HAVE A SINGLE IMAGE, INSTEAD OF HAVING TO CROP IT USING 'region: geometry' and 'region: geometry2'
+///////////////////////////////////////////
+
+var globOptions = { 
+  versionID: '_v3', 
+  outFolder: 'GEE_outputs',
+  date: '_102021',
+  outScale: 30,
+  outScale1: '_30m',//resolution in metres
+};
+
+Export.image.toAsset({
+  image: classified_3C_300,
+  description: 'classified_3C_300'.concat('_2019').concat(globOptions.date).concat(globOptions.outScale1).concat(globOptions.versionID),
+  assetId: 'clean/classified_3C_300'.concat('_2019').concat(globOptions.date).concat(globOptions.outScale1).concat(globOptions.versionID),
+  scale:  globOptions.outScale,
+  region: homeRange_PH,
+  maxPixels: 1e12 
+});
+
+Export.image.toDrive({
+  image: classified_3C_300,
+  description: 'classified_3C_300'.concat('_2019').concat(globOptions.date).concat(globOptions.outScale1).concat(globOptions.versionID),
+  scale: globOptions.outScale, 
+  region: homeRange_PH,
+  maxPixels: 1e12 ,
+  fileFormat: 'GeoTIFF',
+  crs: 'EPSG:4326',
+  folder: 'GEE_outputs',
+  fileNamePrefix: 'classified_3C_300'.concat('_2019').concat(globOptions.date).concat(globOptions.outScale1).concat(globOptions.versionID),
+  });
+
+// // export the random samples
+// Export.table.toAsset({
+//   collection: ee.FeatureCollection(stratified), 
+//   description: 'randomPointsPerClass'.concat('_2019').concat(globOptions.date).concat(globOptions.outScale1).concat(globOptions.versionID),
+//   assetId: 'clean/randomPointsPerClass'.concat('_2019').concat(globOptions.date).concat(globOptions.outScale1).concat(globOptions.versionID)
+// });
 
 
 
